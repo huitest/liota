@@ -102,9 +102,8 @@ if __name__ == '__main__':
         # these call set properties on the Resource representing the gateway in the vrops instance
         # properties are a key:value store
         # arguments are (key, value)
-        for item in config['Gateway1PropList']:
-            for key, value in item.items():
-                vrops.set_properties(key, value, vrops_gateway)
+        vrops.set_properties(vrops_gateway, config['Gateway1PropList'])
+
         # ---------- Create metrics 'on' the Resource in vrops representing the gateway
         # arguments:
         #          local object referring to the Resource in vrops on which the metric should be associated
@@ -141,9 +140,8 @@ if __name__ == '__main__':
     # note that the location of this 'device' is different from the location of the gateway. It's not really different
     # but just an example of how one might create a device different from the gateway
     if vrops_device.registered:
-        for item in config['Device1PropList']:
-            for key, value in item.items():
-                vrops.set_properties(key, value, vrops_device)
+        vrops.set_properties(vrops_device, config['Device1PropList'])
+        
         mem_free = vrops.create_metric(vrops_device, "Memory_Free", unit=None, sampling_interval_sec=10, sampling_function=read_mem_free)
         mem_free.start_collecting()
     else:
@@ -152,9 +150,8 @@ if __name__ == '__main__':
     curve = Function("Curve", 'Read', gateway)
     vrops_curve = vrops.register(curve)
     if vrops_curve.registered:
-        for item in config['Device1PropList']:
-            for key, value in item.items():
-                vrops.set_properties(key, value, vrops_curve)
+        vrops.set_properties(vrops_curve, config['Device1PropList'])
+        
         curve_value = vrops.create_metric(vrops_curve, "Sine_Function_Value", unit=None, sampling_interval_sec=30, sampling_function=get_curve_value)
         curve_value.start_collecting()
     else:
