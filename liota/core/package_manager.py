@@ -236,7 +236,7 @@ class PackageThread(Thread):
     # This method is called to load package into current Liota process using
     # file_name as package identifier.
 
-    def _package_load(self, file_name):
+    def _package_load(self, file_name, ext_forced=None):
         log.debug("Attempting to load package: %s" % file_name)
 
         # Check if specified package is already loaded
@@ -251,12 +251,23 @@ class PackageThread(Thread):
         path_file = os.path.abspath(package_path + c_slash + file_name)
 
         file_ext = None
-        for file_ext_ind in ["py", "pyc", "pyo"]:
-            if os.path.isfile(path_file + "." + file_ext_ind):
-                file_ext = file_ext_ind
-                break
+        extensions = ["py", "pyc", "pyo"]
+        prompt_ext_all = "py[co]?"
+        if not ext_forced:
+            for file_ext_ind in extensions:
+                if os.path.isfile(path_file + "." + file_ext_ind):
+                    file_ext = file_ext_ind
+                    break
+        else:
+            if os.path.isfile(path_file + "." + ext_forced):
+                file_ext = ext_forced
         if not file_ext:
-            log.error("Package file not found: %s" % (path_file + ".py[co]?"))
+            if not ext_forced:
+                log.error("Package file not found: %s" \
+                        % (path_file + "." + prompt_ext_all))
+            else:
+                log.error("Package file not found: %s" \
+                        % (path_file + "." + ext_forced))
             return None
         path_file_ext = path_file + "." + file_ext
         log.info("Package file found: %s" % path_file_ext)
@@ -317,11 +328,8 @@ class PackageThread(Thread):
         package_record = self._packages_loaded[file_name]
         assert(isinstance(package_record, PackageRecord))
         package_obj = package_record.get_instance()
-        try:
-            assert(isinstance(package_obj, LiotaPackage))
-        except:
-            print type(package_obj)
-            print inspect.getmro(package_obj)
+        if not isinstance(package_obj, LiotaPackage):
+            raise TypeError(type(package_obj))
         package_obj.clean_up()
         del self._packages_loaded[file_name]
 
@@ -335,9 +343,24 @@ class PackageThread(Thread):
 
     def _package_reload(self, file_name):
         log.debug("Attempting to reload package: %s" % file_name)
+
+        # Check if specified package is already loaded
+        if not file_name in self._packages_loaded:
+            log.warning("Could not reload package - not loaded: %s" \
+                    % file_name)
+            return False
+
+        # Get extension of source or compiled file of package module
+        package_record = self._packages_loaded[file_name]
+        assert(isinstance(package_record, PackageRecord))
+        ext_forced = package_record.get_ext()
         
+        # Logic of reload
         if self._package_unload(file_name):
-            package_record = self._package_load(file_name)
+            package_record = self._package_load(
+                    file_name,
+                    ext_forced=ext_forced
+                )
             if package_record is not None:
                 log.info("Reloaded package: %s" % file_name)
                 return package_record
