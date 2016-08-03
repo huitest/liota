@@ -32,15 +32,16 @@
 
 import logging
 import inspect
+import imp
+import os
+import stat
+import re
+import hashlib
+import ConfigParser
 from threading import Thread, Lock
 from Queue import Queue
-import ConfigParser
-import os
 from time import sleep
-import imp
-import re
 from abc import ABCMeta, abstractmethod
-import hashlib
 
 from liota.utilities.utility import LiotaConfigPath
 
@@ -59,6 +60,7 @@ package_messenger_thread = None
 package_thread = None
 package_lock = None
 package_path = None
+package_messenger_pipe = None
 
 # Parse Liota configuration file
 config = ConfigParser.RawConfigParser()
@@ -67,7 +69,12 @@ if fullPath != '':
     try:
         if config.read(fullPath) != []:
             try:
-                package_path = config.get('PKG_PATH', 'pkg_path')
+                package_path = os.path.abspath(
+                        config.get('PKG_CFG', 'pkg_path')
+                    )
+                package_messenger_pipe = os.path.abspath(
+                        config.get('PKG_CFG', 'pkg_msg_pipe')
+                    )
             except ConfigParser.ParsingError, err:
                 log.error('Could not parse log config file')
         else:
@@ -141,7 +148,8 @@ class PackageRecord:
     """
 
     def __init__(self, file_name):
-        self.file_name = file_name
+        self._file_name = file_name
+        self._ext = None
         self._sha1 = None
 
         #-------------------------------------------------------------------
@@ -166,6 +174,12 @@ class PackageRecord:
     def get_sha1(self):
         return self._sha1
 
+    def set_ext(self, ext):
+        self._ext = ext
+
+    def get_ext(self):
+        return self._ext
+
 class PackageThread(Thread):
     """
     PackageThread should be instantiated only once.
@@ -188,41 +202,46 @@ class PackageThread(Thread):
         global package_lock
         while True:
             msg = package_message_queue.get()
-            log.info("Got message in package messenger queue: " + " ".join(msg))
-            if not isinstance(msg, tuple):
-                raise RuntimeError
+            log.info("Got message in package messenger queue: %s" \
+                    % " ".join(msg))
+            if not isinstance(msg, tuple) and not isinstance(msg, list):
+                raise TypeError(type(msg))
 
             # Switch on message content (command), determine what to do
             command = msg[0]
-            if command in ["load", "unload", "delete", "update"]:
+            if command in ["load", "unload", "delete", "reload", "update"]:
                 with package_lock:
                     if len(msg) != 2:
-                        raise ValueError("len(msg) is %d" % len(msg))
+                        log.warning("Invalid format of command: %s" % command)
+                        continue
                     file_name = msg[1]
                     if command == "load":
-                        package_record = self._package_load(file_name)
-                        if package_record is not None:
-                            self._packages_loaded[file_name] = package_record
+                        self._package_load(file_name)
                     elif command == "unload":
-                        if self._package_unload(file_name):
-                            del self._packages_loaded[file_name]
+                        self._package_unload(file_name)
                     elif command == "delete":
                         pass # TODO
+                    elif command == "reload":
+                        self._package_reload(file_name)
                     elif command == "update":
                         pass # TODO
+                    else: # should not happen
+                        raise RuntimeError("Command category error")
             elif command == "check":
                 pass # TODO
+            else:
+                log.warning("Unsupported command is dropped")
 
     #-----------------------------------------------------------------------
     # This method is called to load package into current Liota process using
     # file_name as package identifier.
 
     def _package_load(self, file_name):
-        log.debug("Attempting to load package file: " + file_name)
+        log.debug("Attempting to load package: %s" % file_name)
 
         # Check if specified package is already loaded
         if file_name in self._packages_loaded:
-            log.warning("Package already loaded: " + file_name)
+            log.warning("Package already loaded: %s" % file_name)
             return None
 
         # Check if specified package exists
@@ -230,18 +249,26 @@ class PackageThread(Thread):
         if package_path.endswith(c_slash):
             c_slash = ""
         path_file = os.path.abspath(package_path + c_slash + file_name)
-        if not os.path.isfile(path_file):
-            log.error("Package file not found: " + path_file)
+
+        file_ext = None
+        for file_ext_ind in ["py", "pyc", "pyo"]:
+            if os.path.isfile(path_file + "." + file_ext_ind):
+                file_ext = file_ext_ind
+                break
+        if not file_ext:
+            log.error("Package file not found: %s" % (path_file + ".py[co]?"))
             return None
+        path_file_ext = path_file + "." + file_ext
+        log.info("Package file found: %s" % path_file_ext)
 
         # Read file and calculate SHA-1
         try:
-            sha1 = sha1sum(path_file)
+            sha1 = sha1sum(path_file_ext)
         except IOError:
-            log.error("Could not open file: " + path_file)
+            log.error("Could not open file: %s" % path_file_ext)
             return None
         log.info("Loaded package file: %s (%s)" \
-                % (path_file, sha1.hexdigest()))
+                % (path_file_ext, sha1.hexdigest()))
 
         #-------------------------------------------------------------------
         # Following ugly lines do these:
@@ -250,11 +277,20 @@ class PackageThread(Thread):
         #       with class      create instance (object),
         #   and call method run of created instance.
 
-        module_loaded = imp.load_source(
-                re.sub(r"\.", "_", file_name),
-                path_file
-            )
-        log.info("Loaded module: " + module_loaded.__name__)
+        module_loaded = None
+        if file_ext in ["py"]:
+            module_loaded = imp.load_source(
+                    re.sub(r"\.", "_", file_name),
+                    path_file_ext
+                )
+        elif file_ext in ["pyc", "pyo"]:
+            module_loaded = imp.load_compiled(
+                    re.sub(r"\.", "_", file_name),
+                    path_file_ext
+                )
+        else: # should not happen
+            raise RuntimeError("File extension category error")
+        log.info("Loaded module: %s" % module_loaded.__name__)
         klass = getattr(module_loaded, "PackageClass")
         package_record = PackageRecord(file_name)
         if not package_record.set_instance(klass()):
@@ -262,17 +298,20 @@ class PackageThread(Thread):
             return None
         package_record.get_instance().run(self._resource_registry)
         package_record.set_sha1(sha1)
+        package_record.set_ext(file_ext)
+        self._packages_loaded[file_name] = package_record
 
         log.info("Package class from module %s is initialized" \
                 % module_loaded.__name__)
         return package_record
 
     def _package_unload(self, file_name):
-        log.debug("Attempting to unload package file: " + file_name)
+        log.debug("Attempting to unload package: %s" % file_name)
         
         # Check if specified package is already loaded
         if not file_name in self._packages_loaded:
-            log.warning("Could not unload package if not loaded: " + file_name)
+            log.warning("Could not unload package - not loaded: %s" \
+                    % file_name)
             return False
 
         package_record = self._packages_loaded[file_name]
@@ -284,39 +323,57 @@ class PackageThread(Thread):
             print type(package_obj)
             print inspect.getmro(package_obj)
         package_obj.clean_up()
+        del self._packages_loaded[file_name]
 
-        log.info("Unloaded package file: " + file_name)
+        log.info("Unloaded package: %s" % file_name)
         return True
 
     def _package_delete(self, file_name):
-        log.debug("Attempting to delete package file: " + file_name)
+        log.debug("Attempting to delete package: %s" % file_name)
         pass # TODO
-        log.info("Deleted package file: " + file_name)
+        log.info("Deleted package: %s" % file_name)
+
+    def _package_reload(self, file_name):
+        log.debug("Attempting to reload package: %s" % file_name)
+        
+        if self._package_unload(file_name):
+            package_record = self._package_load(file_name)
+            if package_record is not None:
+                log.info("Reloaded package: %s" % file_name)
+                return package_record
+            else:
+                log.error("Unloaded but could not reload package: %s" \
+                        % file_name)
+        else:
+            log.warning("Could not unload package: %s" % file_name)
+        return False
 
     def _package_update(self, file_name):
-        log.debug("Attempting to update package file: " + file_name)
-        self._package_unload(file_name)
-        self._package_load(file_name)
-        log.info("Updated package file: " + file_name)
+        log.debug("Attempting to update package: %s" % file_name)
+        pass # TODO
+        log.info("Updated package: %s" % file_name)
 
 class PackageMessengerThread(Thread):
+    """
+    PackageMessengerThread does inter-process communication (IPC) to listen
+    to commands casted by other processes (potentially from AirWatch, etc.)
+    Current implementation of PackageMessengerThread blocks on a named pipe.
+    """
+
     def __init__(self):
         Thread.__init__(self)
         self.start()
 
     def run(self):
-        global package_thread
-        global package_lock
+        global package_messenger_pipe
+        global package_message_queue
         while True:
-            if package_thread is not None:
-                sleep(10)
-                with package_lock:
-                    if "test.py" in package_thread._packages_loaded:
-                        pass
-                        package_message_queue.put(("unload", "test.py"))
-                    else:
-                        package_message_queue.put(("load", "test.py"))
-        # XXX
+            with open(package_messenger_pipe, "r") as fp:
+                for line in fp.readlines():
+                    msg = line.split()
+                    if len(msg) > 0:
+                        package_message_queue.put(msg)
+
 
 #---------------------------------------------------------------------------
 # Initialization should occur when this module is imported for first time.
@@ -332,17 +389,50 @@ def initialize():
 
     # Validate package path
     global package_path
-    if isinstance(package_path, basestring):
-        if os.path.isdir(package_path):
-            try:
-                os.listdir(package_path)
-            except OSError:
-                package_path = None
-                log.warning("Could not access package path")
-                return
-        else:
+    assert(isinstance(package_path, basestring))
+    if os.path.isdir(package_path):
+        try:
+            os.listdir(package_path)
+        except OSError:
             package_path = None
-            log.warning("Could not find package path")
+            log.error("Could not access package path")
+            return
+    else:
+        log.debug("Could not find package path: " + package_path)
+        try:
+            os.makedirs(package_path)
+            log.info("Created package path: " + package_path)
+        except OSError:
+            package_path = None
+            log.error("Could not create package path")
+            return
+
+    # Validate package messenger pipe
+    global package_messenger_pipe
+    assert(isinstance(package_messenger_pipe, basestring))
+    if os.path.exists(package_messenger_pipe):
+        if stat.S_ISFIFO(os.stat(package_messenger_pipe).st_mode):
+            pass
+        else:
+            log.error("Pipe path exists, but it is not a pipe")
+            package_messenger_pipe = None
+            return
+    else:
+        package_messenger_pipe_dir = os.path.dirname(package_messenger_pipe)
+        if not os.path.isdir(package_messenger_pipe_dir):
+            try:
+                os.makedirs(package_messenger_pipe_dir)
+                log.info("Created directory: " + package_messenger_pipe_dir)
+            except OSError:
+                package_messenger_pipe = None
+                log.error("Could not create directory for messenger pipe")
+                return
+        try:
+            os.mkfifo(package_messenger_pipe)
+            log.info("Created pipe: " + package_messenger_pipe)
+        except OSError:
+            package_messenger_pipe = None
+            log.error("Could not create messenger pipe")
             return
 
     # Will not initialize package manager if package path is mis-configured
