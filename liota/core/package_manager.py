@@ -185,6 +185,7 @@ class PackageRecord:
         self._file_name = file_name
         self._ext = None
         self._sha1 = None
+        self._dependents = {} # key: dependent name, value: None
 
         #-------------------------------------------------------------------
         # To guarantee successful garbage collection when record is removed,
@@ -213,6 +214,15 @@ class PackageRecord:
 
     def get_ext(self):
         return self._ext
+
+    def get_dependents(self):
+        return self._dependents.keys()
+
+    def add_dependent(self, file_name):
+        self._dependents[file_name] = None
+
+    def del_dependent(self, file_name):
+        del self._dependents[file_name]
 
 class PackageThread(Thread):
     """
@@ -386,7 +396,7 @@ class PackageThread(Thread):
                         % (path_file + "." + ext_forced))
             return None
         path_file_ext = path_file + "." + file_ext
-        log.info("Package file found: %s" % path_file_ext)
+        log.debug("Package file found: %s" % path_file_ext)
 
         # Read file and calculate SHA-1
         try:
@@ -398,11 +408,20 @@ class PackageThread(Thread):
                 % (path_file_ext, sha1.hexdigest()))
 
         #-------------------------------------------------------------------
-        # Following ugly lines do these:
-        #       from file path  load module,
-        #       from module     load class,
-        #       with class      create instance (object),
-        #   and call method run of created instance.
+        # Following sections do these:
+        #   1)     from file path  load module,
+        #   2)     from module     load class,
+        #   3)     with class      create instance (object),
+        #   4) and call method run of created instance.
+
+        #-------------------------------------------------------------------
+        # Attempt to load package module from file.
+        # Supported file types are source files (.py) with highest priority,
+        #                          compiled files (.pyc),
+        #                      and optimized compiled files (.pyo).
+        # Having .py files to have highest priority guarantees that coming
+        # packages in .py format can override compiled files of its previous
+        # version.
 
         module_loaded = None
         module_name = re.sub(r"\.", "_", file_name)
@@ -418,18 +437,48 @@ class PackageThread(Thread):
                 )
         else: # should not happen
             raise RuntimeError("File extension category error")
-        log.info("Loaded module: %s" % module_loaded.__name__)
+        log.debug("Loaded module: %s" % module_loaded.__name__)
+
+        #-------------------------------------------------------------------
+        # Acquire dependency list and recursively load them.
+        # If any dependency fails to load, current package will not load.
+
+        if hasattr(module_loaded, "dependencies"):
+            dependencies = getattr(module_loaded, "dependencies")
+            if not isinstance(dependencies, list):
+                log.error("Mal-formatted list of dependencies in module %s" \
+                        % module_loaded.__name__)
+                return None
+
+            log.info("Package %s depends on: %s" \
+                    % (file_name, " ".join(dependencies)))
+            for dependency in dependencies:
+                if not dependency in self._packages_loaded:
+                    self._package_load(dependency)
+                if not dependency in self._packages_loaded:
+                    log.error("%s is not loaded, because %s failed to load" \
+                            % (file_name, dependency))
+                    return None
+                
+                # Add dependent record
+                dep_record = self._packages_loaded[dependency]
+                assert(isinstance(dep_record, PackageRecord))
+                dep_record.add_dependent(file_name)
+            log.debug("Dependency check of package %s is complete" \
+                    % file_name)
+
+        # Get package class from module and instantiate it
         klass = getattr(module_loaded, "PackageClass")
         package_record = PackageRecord(file_name)
         if not package_record.set_instance(klass()):
             log.error("Unexpected failure initializing package")
             return None
-        try:
+        try: # Run created instance
             package_record.get_instance().run(
                     self._resource_registry.get_package_registry(file_name)
                 )
         except Exception as er:
-            log.error("Exception in initialization: %s" % er)
+            log.error("Exception in initialization: %s" % str(er))
             return None
         package_record.set_sha1(sha1)
         package_record.set_ext(file_ext)
@@ -453,6 +502,24 @@ class PackageThread(Thread):
 
         package_record = self._packages_loaded[file_name]
         assert(isinstance(package_record, PackageRecord))
+
+        # Stop all dependents, before making any change to current package
+        dependents = package_record.get_dependents()
+        
+        if len(dependents) > 0:
+            log.info("Package %s is depended by: %s" \
+                    % (file_name, " ".join(dependents)))
+            for dependent in dependents:
+                if dependent in self._packages_loaded:
+                    self._package_unload(dependent)
+                if dependent in self._packages_loaded:
+                    log.error("%s is still alive, because %s failed to unload" \
+                        % (file_name, dependent))
+                    return False
+                package_record.del_dependent(dependent)
+            log.debug("Dependency check of package %s is complete" \
+                % file_name)
+
         package_obj = package_record.get_instance()
         if not isinstance(package_obj, LiotaPackage):
             raise TypeError(type(package_obj))
@@ -463,7 +530,7 @@ class PackageThread(Thread):
             for identifier in self._resource_registry._packages[file_name]:
                 self._resource_registry.deregister(identifier)
             del self._resource_registry._packages[file_name]
-            log.info("Deregistered resource refs for package: %s" \
+            log.debug("Deregistered resource refs for package: %s" \
                     % file_name)
         else:
             log.warning("Could not deregister resource refs for package: %s" \
