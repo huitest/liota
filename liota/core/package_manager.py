@@ -229,7 +229,7 @@ class PackageThread(Thread):
 
         self._packages_loaded = {} # key: package name, value: PackageRecord obj
         self._resource_registry = ResourceRegistry()
-        self._resource_registry.register("package_path", package_path)
+        self._resource_registry.register("package_conf", package_path)
         try:
             self._first_load()
             self.start()
