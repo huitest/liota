@@ -85,6 +85,27 @@ else:
     # missing config file
     log.error('liota.conf file missing')
 
+class ResourceRegistryPerPackage:
+    """
+    ResourceRegistryPerPackage creates temporary objects for packages while
+    loading, so when they register their resource refs, we can keep track of
+    them in resource registry and automatically remove them later when these
+    packages are unloaded.
+    """
+
+    def __init__(self, outer, package_name):
+        self._outer = outer
+        self._package_name = package_name
+
+    def register(self, identifier, ref):
+        self._outer.register(identifier, ref, self._package_name)
+
+    def get(self, identifier):
+        return self._outer.get(identifier)
+
+    def has(self, identifier):
+        return self._outer.has(identifier)
+
 class ResourceRegistry:
     """
     ResourceRegistry is a wrapped structure for Liota packages to register
@@ -92,12 +113,17 @@ class ResourceRegistry:
     """
 
     def __init__(self):
-        self._registry = {}
+        self._registry = {} # key: resource name, value: resource ref
+        self._packages = {} # key: package name, value: list of resource names
 
-    def register(self, identifier, ref):
+    def register(self, identifier, ref, package_name=None):
         if identifier in self._registry:
             raise KeyError("Conflicting resource identifier: " + identifier)
         self._registry[identifier] = ref
+        if package_name:
+            if not package_name in self._packages:
+                self._packages[package_name] = []
+            self._packages[package_name].append(identifier)
 
     def deregister(self, identifier):
         del self._registry[identifier]
@@ -107,6 +133,14 @@ class ResourceRegistry:
 
     def has(self, identifier):
         return identifier in self._registry
+
+    #-----------------------------------------------------------------------
+    # This method generate a package specific registry object, so when they
+    # register their resource refs, we keep track of them and can deregister
+    # them automatically if package is unloaded.
+
+    def get_package_registry(self, package_name):
+        return ResourceRegistryPerPackage(self, package_name)
 
 class LiotaPackage:
     """
@@ -190,9 +224,62 @@ class PackageThread(Thread):
 
     def __init__(self):
         Thread.__init__(self)
-        self._packages_loaded = {}
+
+        global package_path
+
+        self._packages_loaded = {} # key: package name, value: PackageRecord obj
         self._resource_registry = ResourceRegistry()
-        self.start()
+        self._resource_registry.register("package_path", package_path)
+        try:
+            self._first_load()
+            self.start()
+        except OSError: # Will not start if self._first_load fails
+            pass
+
+    #-----------------------------------------------------------------------
+    # This method is called before PacakgeThread starts to load gateway def
+    # that some other packages (like DCCs) may depend on implicitly.
+    # This is used to avoid having everything duplicated just for different
+    # gateway specifications
+
+    def _first_load(self):
+        global package_lock
+
+        with package_lock:
+            # Try to load default gateway package
+            if self._package_load("gateway") is None:
+                global package_path
+
+                # Look for all files in package_path that is named gateway_*.py
+                gateway_candidates = []
+                re_obj_extensions = re.compile(r"^(gateway_.+)\.py[co]?$")
+                log.debug("Search package path for gateway: %s" % package_path)
+                for item in os.listdir(package_path):
+                    if re_obj_extensions.search(item):
+                        file_name = re_obj_extensions.sub(r"\1", item, count=1)
+                        if not file_name in gateway_candidates:
+                            gateway_candidates.append(file_name)
+                gateway_candidates.sort()
+                log.info("Discovered gateway package candidates: %s" \
+                        % " ".join(gateway_candidates))
+
+                # Will load only when there is exactly one candidate
+                if len(gateway_candidates) == 1:
+                    if self._package_load(gateway_candidates[0]):
+                        log.info("Loaded %s as gateway" \
+                                % gateway_candidates[0])
+                    else:
+                        log.error("Could not load %s as gateway" \
+                                % gateway_candidates[0])
+                elif len(gateway_candidates) < 1:
+                    log.error("Could not find any gateway package candidate")
+                else:
+                    log.error("Found too many gateway package candidates")
+            else:
+                log.info("Loaded default gateway")
+        if not self._resource_registry.has("gateway"):
+            log.error("Could not find gateway registration, please fix")
+            raise OSError()
 
     #-----------------------------------------------------------------------
     # This method will loop on message queue and select methods to call with
@@ -200,6 +287,9 @@ class PackageThread(Thread):
 
     def run(self):
         global package_lock
+
+        # Listen on message queue for commands
+        # Other packages are loaded here according to commands received
         while True:
             msg = package_message_queue.get()
             log.info("Got message in package messenger queue: %s" \
@@ -210,6 +300,9 @@ class PackageThread(Thread):
             # Switch on message content (command), determine what to do
             command = msg[0]
             if command in ["load", "unload", "delete", "reload", "update"]:
+                #-----------------------------------------------------------
+                # Use these commands to handle package management tasks
+
                 with package_lock:
                     if len(msg) != 2:
                         log.warning("Invalid format of command: %s" % command)
@@ -227,14 +320,37 @@ class PackageThread(Thread):
                         pass # TODO
                     else: # should not happen
                         raise RuntimeError("Command category error")
-            elif command == "check":
-                pass # TODO
+            elif command == "list":
+                #-----------------------------------------------------------
+                # Use these commands to output listings to log files
+
+                with package_lock:
+                    if len(msg) != 2:
+                        log.warning("Invalid format of command: %s" % command)
+                        continue
+                    parameter = msg[1]
+                    if parameter == "packages" or parameter == "pkg":
+                        log.warning("List of packages: %s" \
+                                % " ".join(sorted(
+                                        self._packages_loaded.keys()
+                                    ))
+                            )
+                    elif parameter == "resources" or parameter == "res":
+                        log.warning("List of resources: %s" \
+                                % " ".join(sorted(
+                                        self._resource_registry._registry.keys()
+                                    ))
+                            )
+                    else:
+                        log.warning("Unsupported list")
+            # elif command == "check":
+            #     pass # TODO
             else:
                 log.warning("Unsupported command is dropped")
 
     #-----------------------------------------------------------------------
     # This method is called to load package into current Liota process using
-    # file_name as package identifier.
+    # file_name (no_ext) as package identifier.
 
     def _package_load(self, file_name, ext_forced=None):
         log.debug("Attempting to load package: %s" % file_name)
@@ -289,14 +405,15 @@ class PackageThread(Thread):
         #   and call method run of created instance.
 
         module_loaded = None
+        module_name = re.sub(r"\.", "_", file_name)
         if file_ext in ["py"]:
             module_loaded = imp.load_source(
-                    re.sub(r"\.", "_", file_name),
+                    module_name,
                     path_file_ext
                 )
         elif file_ext in ["pyc", "pyo"]:
             module_loaded = imp.load_compiled(
-                    re.sub(r"\.", "_", file_name),
+                    module_name,
                     path_file_ext
                 )
         else: # should not happen
@@ -307,7 +424,13 @@ class PackageThread(Thread):
         if not package_record.set_instance(klass()):
             log.error("Unexpected failure initializing package")
             return None
-        package_record.get_instance().run(self._resource_registry)
+        try:
+            package_record.get_instance().run(
+                    self._resource_registry.get_package_registry(file_name)
+                )
+        except Exception as er:
+            log.error("Exception in initialization: %s" % er)
+            return None
         package_record.set_sha1(sha1)
         package_record.set_ext(file_ext)
         self._packages_loaded[file_name] = package_record
@@ -315,6 +438,9 @@ class PackageThread(Thread):
         log.info("Package class from module %s is initialized" \
                 % module_loaded.__name__)
         return package_record
+
+    #-----------------------------------------------------------------------
+    # This method is called to unload package using its file_name (no ext).
 
     def _package_unload(self, file_name):
         log.debug("Attempting to unload package: %s" % file_name)
@@ -330,7 +456,24 @@ class PackageThread(Thread):
         package_obj = package_record.get_instance()
         if not isinstance(package_obj, LiotaPackage):
             raise TypeError(type(package_obj))
-        package_obj.clean_up()
+
+        # Deregister resources
+        # Unload should proceed no matter deregistration succeeds or not
+        if file_name in self._resource_registry._packages:
+            for identifier in self._resource_registry._packages[file_name]:
+                self._resource_registry.deregister(identifier)
+            del self._resource_registry._packages[file_name]
+            log.info("Deregistered resource refs for package: %s" \
+                    % file_name)
+        else:
+            log.warning("Could not deregister resource refs for package: %s" \
+                    % file_name)
+
+        # Clean-up
+        try:
+            package_obj.clean_up()
+        except Exception as er:
+            log.error("Exception in clean-up: %s" % er)
         del self._packages_loaded[file_name]
 
         log.info("Unloaded package: %s" % file_name)
@@ -340,6 +483,12 @@ class PackageThread(Thread):
         log.debug("Attempting to delete package: %s" % file_name)
         pass # TODO
         log.info("Deleted package: %s" % file_name)
+
+    #-----------------------------------------------------------------------
+    # This method is called to reload package.
+    # We keep track of full file name (with ext) when loading, so reload
+    # will always load exactly that same file, even if a different higher-
+    # level source file is added before reload.
 
     def _package_reload(self, file_name):
         log.debug("Attempting to reload package: %s" % file_name)
@@ -390,13 +539,13 @@ class PackageMessengerThread(Thread):
     def run(self):
         global package_messenger_pipe
         global package_message_queue
+
         while True:
             with open(package_messenger_pipe, "r") as fp:
                 for line in fp.readlines():
                     msg = line.split()
                     if len(msg) > 0:
                         package_message_queue.put(msg)
-
 
 #---------------------------------------------------------------------------
 # Initialization should occur when this module is imported for first time.
@@ -467,17 +616,20 @@ def initialize():
     global package_message_queue
     if package_message_queue is None:
         package_message_queue = Queue()
-    global package_thread
-    if package_thread is None:
-        package_thread = PackageThread()
     global package_lock
     if package_lock is None:
         package_lock = Lock()
+    global package_thread
+    if package_thread is None:
+        package_thread = PackageThread()
 
     # PackageMessengerThread should start last because it triggers actions 
     global package_messenger_thread
     if package_messenger_thread is None:
-        package_messenger_thread = PackageMessengerThread()
+        if package_thread.isAlive():
+            package_messenger_thread = PackageMessengerThread()
+        else:
+            log.warning("Package messenger will not start")
 
     # Mark package manager as initialized
     is_package_manager_initialized = True
@@ -487,4 +639,4 @@ def initialize():
 if not is_package_manager_initialized:
     initialize()
 
-log.debug("Package manager module is imported")
+log.debug("Package manager is imported")
