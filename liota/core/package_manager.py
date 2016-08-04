@@ -453,7 +453,7 @@ class PackageThread(Thread):
             if len(dependencies) > 0:
                 log.info("Package %s depends on: %s" \
                         % (file_name, " ".join(dependencies)))
-                if check_stack is None:
+                if not isinstance(check_stack, list):
                     check_stack = []
                 check_stack.append(file_name)
                 for dependency in dependencies:
@@ -502,7 +502,7 @@ class PackageThread(Thread):
     #-----------------------------------------------------------------------
     # This method is called to unload package using its file_name (no ext).
 
-    def _package_unload(self, file_name):
+    def _package_unload(self, file_name, track_list=None):
         log.debug("Attempting to unload package: %s" % file_name)
         
         # Check if specified package is already loaded
@@ -522,7 +522,7 @@ class PackageThread(Thread):
                     % (file_name, " ".join(dependents)))
             for dependent in dependents:
                 if dependent in self._packages_loaded:
-                    self._package_unload(dependent)
+                    self._package_unload(dependent, track_list=track_list)
                 if dependent in self._packages_loaded:
                     log.error("%s is still alive, because %s failed to unload" \
                         % (file_name, dependent))
@@ -552,6 +552,8 @@ class PackageThread(Thread):
             package_obj.clean_up()
         except Exception as er:
             log.error("Exception in clean-up: %s" % er)
+        if isinstance(track_list, list):
+            track_list.append((file_name, package_record.get_ext()))
         del self._packages_loaded[file_name]
 
         log.info("Unloaded package: %s" % file_name)
@@ -577,23 +579,39 @@ class PackageThread(Thread):
                     % file_name)
             return False
 
+        """
         # Get extension of source or compiled file of package module
         package_record = self._packages_loaded[file_name]
         assert(isinstance(package_record, PackageRecord))
         ext_forced = package_record.get_ext()
+        """
         
         # Logic of reload
-        if self._package_unload(file_name):
-            package_record = self._package_load(
-                    file_name,
-                    ext_forced=ext_forced
+        track_list = []
+        if self._package_unload(file_name, track_list=track_list):
+            package_record = None
+            track_list.reverse()
+            log.info("Packages will be reloaded: %s" \
+                    % " ".join(
+                            map(lambda item: item[0], track_list)
+                        )
                 )
-            if package_record is not None:
-                log.info("Reloaded package: %s" % file_name)
+            for track_item in track_list:
+                if track_item[0] in self._packages_loaded:
+                    continue
+                temp_record = \
+                    self._package_load(track_item[0], ext_forced=track_item[1])
+                if temp_record is not None:
+                    if track_item[0] == file_name:
+                        package_record = temp_record
+                    log.info("Reloaded package: %s" % file_name)
+                else:
+                    log.error("Unloaded but could not reload package: %s" \
+                            % file_name)
+            if not package_record is None:
                 return package_record
             else:
-                log.error("Unloaded but could not reload package: %s" \
-                        % file_name)
+                return False
         else:
             log.warning("Could not unload package: %s" % file_name)
         return False
