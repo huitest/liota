@@ -362,7 +362,7 @@ class PackageThread(Thread):
     # This method is called to load package into current Liota process using
     # file_name (no_ext) as package identifier.
 
-    def _package_load(self, file_name, ext_forced=None):
+    def _package_load(self, file_name, ext_forced=None, check_stack=None):
         log.debug("Attempting to load package: %s" % file_name)
 
         # Check if specified package is already loaded
@@ -450,22 +450,33 @@ class PackageThread(Thread):
                         % module_loaded.__name__)
                 return None
 
-            log.info("Package %s depends on: %s" \
-                    % (file_name, " ".join(dependencies)))
-            for dependency in dependencies:
-                if not dependency in self._packages_loaded:
-                    self._package_load(dependency)
-                if not dependency in self._packages_loaded:
-                    log.error("%s is not loaded, because %s failed to load" \
-                            % (file_name, dependency))
-                    return None
-                
-                # Add dependent record
-                dep_record = self._packages_loaded[dependency]
-                assert(isinstance(dep_record, PackageRecord))
-                dep_record.add_dependent(file_name)
-            log.debug("Dependency check of package %s is complete" \
-                    % file_name)
+            if len(dependencies) > 0:
+                log.info("Package %s depends on: %s" \
+                        % (file_name, " ".join(dependencies)))
+                if check_stack is None:
+                    check_stack = []
+                check_stack.append(file_name)
+                for dependency in dependencies:
+                    if dependency in check_stack:
+                        log.error("%s is not loaded, because %s depends on it" \
+                                % (file_name, dependency))
+                        check_stack.pop()
+                        return None
+                    if not dependency in self._packages_loaded:
+                        self._package_load(dependency, check_stack=check_stack)
+                    if not dependency in self._packages_loaded:
+                        log.error("%s is not loaded, because %s failed to load"\
+                                % (file_name, dependency))
+                        check_stack.pop()
+                        return None
+                    
+                    # Add dependent record
+                    dep_record = self._packages_loaded[dependency]
+                    assert(isinstance(dep_record, PackageRecord))
+                    dep_record.add_dependent(file_name)
+                check_stack.pop()
+                log.debug("Dependency check of package %s is complete" \
+                        % file_name)
 
         # Get package class from module and instantiate it
         klass = getattr(module_loaded, "PackageClass")
