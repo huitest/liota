@@ -46,6 +46,7 @@ collect_queue = None
 send_queue = None
 event_checker_thread = None
 send_thread = None
+collect_thread_pool = None
 
 class EventsPriorityQueue(PriorityQueue):
     def __init__(self):
@@ -120,6 +121,9 @@ class EventCheckerThread(Thread):
             log.debug("Waiting for event...")
             matric = event_ds.get_next_element_when_ready()
             log.debug("Got event:" + str(matric))
+            if not matric.flag_alive:
+                log.debug("Disregarded dead metric")
+                continue
             collect_queue.put(matric)
 
 class SendThread(Thread):
@@ -134,12 +138,16 @@ class SendThread(Thread):
             log.info("Waiting to send...")
             matric = send_queue.get()
             log.info("Got item in send_queue:" + str(matric))
+            if not matric.flag_alive:
+                log.debug("Disregarded dead metric")
+                continue
             matric.send_data()
 
 class CollectionThread(Thread):
     def __init__(self):
         Thread.__init__(self)
         self.daemon = True
+        self.working_obj = None
         self.start()
 
     def run(self):
@@ -150,7 +158,15 @@ class CollectionThread(Thread):
             matric = collect_queue.get()
             log.info("Collecting stats for matric:" + str(matric))
             try:
+                if not matric.flag_alive:
+                    log.debug("Disregarded dead metric")
+                    continue
+                self.working_obj = matric
                 matric.collect()
+                self.working_obj = None
+                if not matric.flag_alive:
+                    log.debug("Disregarded dead metric")
+                    continue
                 matric.set_next_run_time()
                 event_ds.put_and_notify(matric)
                 if matric.is_ready_to_send():
@@ -160,8 +176,22 @@ class CollectionThread(Thread):
 
 class CollectionThreadPool:
     def __init__(self, num_threads):
+        self._num_threads = num_threads
+        self._pool = []
+
         log.info("Starting " + str(num_threads) + " for collection")
-        for _ in range(num_threads): CollectionThread()
+        for _ in range(num_threads):
+            self._pool.append(CollectionThread())
+
+    def get_num_threads(self):
+        return self._num_threads
+
+    def get_num_working(self):
+        ret = 0
+        for tref in self._pool:
+            if not tref.working_obj is None:
+                ret += 1
+        return ret
 
 is_initialization_done = False
 
@@ -187,7 +217,9 @@ def initialize():
         global send_thread
         if send_thread == None:
             send_thread = SendThread()
-        pool = CollectionThreadPool(20)  # TODO: Make pool size configurable
+        global collect_thread_pool
+        # TODO: Make pool size configurable
+        collect_thread_pool = CollectionThreadPool(20)
         is_initialization_done = True
 
 class Metric(object):
@@ -202,6 +234,7 @@ class Metric(object):
             self.current_aggregation_size = 0
             self.sampling_function = sampling_function
             self.values = []
+            self.flag_alive = True # For metric deletion and stop collection
 
         def __str__(self, *args, **kwargs):
             return str(self.details) + ":" + str(self.next_run_time)
@@ -258,4 +291,10 @@ class Metric(object):
             self.data_center_component.publish(self)
             self.values[:] = []
             self.current_aggregation_size = 0
+
+        def stop_collecting(self):
+            self.flag_alive = False
+            log.info("Metric %s is marked for deletion" % str(self.details))
+
+            # TODO: Handle blocked sampling functions and their collecting thread
 

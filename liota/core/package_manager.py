@@ -292,6 +292,47 @@ class PackageThread(Thread):
             raise OSError()
 
     #-----------------------------------------------------------------------
+    # This method is used to handle listing commands
+
+    def _cmd_handler_list(self, parameter):
+        if parameter == "packages" or parameter == "pkg":
+            log.warning("List of packages: %s" \
+                    % " ".join(sorted(
+                            self._packages_loaded.keys()
+                        ))
+                )
+            return
+        if parameter == "resources" or parameter == "res":
+            log.warning("List of resources: %s" \
+                    % " ".join(sorted(
+                            self._resource_registry._registry.keys()
+                        ))
+                )
+            return
+        if parameter == "metrics" or parameter == "met":
+            from liota.core.metric_handler \
+                import event_ds, collect_queue, send_queue, \
+                       CollectionThreadPool, collect_thread_pool
+
+            stats = ["n/a", "n/a", "n/a", "n/a"]
+            if isinstance(event_ds, Queue):
+                stats[0] = str(event_ds.qsize())
+            if isinstance(send_queue, Queue):
+                stats[1] = str(send_queue.qsize())
+            if isinstance(collect_queue, Queue):
+                stats[2] = str(collect_queue.qsize())
+            if isinstance(collect_thread_pool, CollectionThreadPool):
+                stats[3] = collect_thread_pool.get_num_working()
+            log.warning(("Number of metrics in - " \
+                    + "Waiting queue: %s, " \
+                    + "Sending queue: %s, " \
+                    + "Collecting queue: %s, " \
+                    + "Collecting threads: %s"
+                ) % tuple(stats))
+            return
+        log.warning("Unsupported list")
+
+    #-----------------------------------------------------------------------
     # This method will loop on message queue and select methods to call with
     # respect to commands received.
 
@@ -331,30 +372,11 @@ class PackageThread(Thread):
                     else: # should not happen
                         raise RuntimeError("Command category error")
             elif command == "list":
-                #-----------------------------------------------------------
-                # Use these commands to output listings to log files
-
                 with package_lock:
                     if len(msg) != 2:
                         log.warning("Invalid format of command: %s" % command)
                         continue
-                    parameter = msg[1]
-                    if parameter == "packages" or parameter == "pkg":
-                        log.warning("List of packages: %s" \
-                                % " ".join(sorted(
-                                        self._packages_loaded.keys()
-                                    ))
-                            )
-                    elif parameter == "resources" or parameter == "res":
-                        log.warning("List of resources: %s" \
-                                % " ".join(sorted(
-                                        self._resource_registry._registry.keys()
-                                    ))
-                            )
-                    else:
-                        log.warning("Unsupported list")
-            # elif command == "check":
-            #     pass # TODO
+                    self._cmd_handler_list(msg[1])
             else:
                 log.warning("Unsupported command is dropped")
 
@@ -510,6 +532,13 @@ class PackageThread(Thread):
             log.warning("Could not unload package - not loaded: %s" \
                     % file_name)
             return False
+
+        # Check if specified package is gateway
+        if re.compile(r"^gateway_(.+)$").search(file_name):
+            if track_list is None:
+                log.warning("Should not unload gateway package: %s" \
+                    % file_name)
+                return False
 
         package_record = self._packages_loaded[file_name]
         assert(isinstance(package_record, PackageRecord))
