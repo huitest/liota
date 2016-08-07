@@ -232,8 +232,8 @@ class PackageThread(Thread):
     etc.
     """
 
-    def __init__(self, name=None):
-        Thread.__init__(self, name=name)
+    def __init__(self):
+        Thread.__init__(self)
 
         global package_path
 
@@ -257,10 +257,6 @@ class PackageThread(Thread):
 
         with package_lock:
             # Try to load default gateway package
-            self._package_load("gateway")
-
-            # Old codes to look for gateway definitions, keep for a few commits
-            """
             if self._package_load("gateway") is None:
                 global package_path
 
@@ -291,9 +287,8 @@ class PackageThread(Thread):
                     log.error("Found too many gateway package candidates")
             else:
                 log.info("Loaded default gateway")
-            """
         if not self._resource_registry.has("gateway"):
-            log.error("Could not find gateway, please fix")
+            log.error("Could not find gateway registration, please fix")
             raise OSError()
 
     #-----------------------------------------------------------------------
@@ -301,43 +296,19 @@ class PackageThread(Thread):
 
     def _cmd_handler_list(self, parameter):
         if parameter == "packages" or parameter == "pkg":
-            log.warning("List of packages - \n\t%s" \
-                    % "\n\t".join(sorted(
+            log.warning("List of packages: %s" \
+                    % " ".join(sorted(
                             self._packages_loaded.keys()
                         ))
                 )
             return
         if parameter == "resources" or parameter == "res":
-            log.warning("List of resources - \n\t%s" \
-                    % "\n\t".join(sorted(
+            log.warning("List of resources: %s" \
+                    % " ".join(sorted(
                             self._resource_registry._registry.keys()
                         ))
                 )
             return
-        if parameter == "threads" or parameter == "th":
-            import threading
-            
-            log.warning("Active threads - \n\t%s" \
-                    % "\n\t".join(map(
-                        lambda tref: "%s: %016x %s %s" % (
-                                tref.name,
-                                tref.ident,
-                                type(tref).__name__.split(".")[-1],
-                                tref.isAlive()
-                            ),
-                        sorted(
-                            threading.enumerate(),
-                            key=lambda tref: tref.ident
-                        )
-                    ))
-                )
-            return
-        log.warning("Unsupported list")
-
-    #-----------------------------------------------------------------------
-    # This method is used to handle statistical commands
-
-    def _cmd_handler_stat(self, parameter):
         if parameter == "metrics" or parameter == "met":
             from liota.core.metric_handler \
                 import event_ds, collect_queue, send_queue, \
@@ -351,38 +322,15 @@ class PackageThread(Thread):
             if isinstance(collect_queue, Queue):
                 stats[2] = str(collect_queue.qsize())
             if isinstance(collect_thread_pool, CollectionThreadPool):
-                stats[3] = collect_thread_pool.get_stats_working()[0]
-            log.warning(("Number of metrics in - \n\t" \
-                    + "Waiting queue: %s\n\t" \
-                    + "Sending queue: %s\n\t" \
-                    + "Collecting queue: %s\n\t" \
+                stats[3] = collect_thread_pool.get_num_working()
+            log.warning(("Number of metrics in - " \
+                    + "Waiting queue: %s, " \
+                    + "Sending queue: %s, " \
+                    + "Collecting queue: %s, " \
                     + "Collecting threads: %s"
                 ) % tuple(stats))
             return
-        if parameter == "collection_threads" or parameter == "col":
-            from liota.core.metric_handler \
-                import CollectionThreadPool, collect_thread_pool
-
-            stats = ["n/a", "n/a", "n/a", "n/a"]
-            if isinstance(collect_thread_pool, CollectionThreadPool):
-                stats = map(
-                        lambda n: str(n), 
-                        collect_thread_pool.get_stats_working()
-                    )
-            log.warning(("Status of collection threads - \n\t" \
-                    + "Collecting: %s\n\t" \
-                    + "Alive: %s\n\t" \
-                    + "Pool: %s\n\t" \
-                    + "Capacity: %s"
-                ) % tuple(stats))
-            return
-        if parameter == "threads" or parameter == "th":
-            import threading
-
-            log.warning("Count of active threads: %d" \
-                    % threading.active_count())
-            return
-        log.warning("Unsupported stat")
+        log.warning("Unsupported list")
 
     #-----------------------------------------------------------------------
     # This method will loop on message queue and select methods to call with
@@ -429,12 +377,6 @@ class PackageThread(Thread):
                         log.warning("Invalid format of command: %s" % command)
                         continue
                     self._cmd_handler_list(msg[1])
-            elif command == "stat":
-                with package_lock:
-                    if len(msg) != 2:
-                        log.warning("Invalid format of command: %s" % command)
-                        continue
-                    self._cmd_handler_stat(msg[1])
             else:
                 log.warning("Unsupported command is dropped")
 
@@ -715,8 +657,8 @@ class PackageMessengerThread(Thread):
     Current implementation of PackageMessengerThread blocks on a named pipe.
     """
 
-    def __init__(self, name=None):
-        Thread.__init__(self, name=name)
+    def __init__(self):
+        Thread.__init__(self)
         self.start()
 
     def run(self):
@@ -804,14 +746,13 @@ def initialize():
         package_lock = Lock()
     global package_thread
     if package_thread is None:
-        package_thread = PackageThread(name="PackageThread")
+        package_thread = PackageThread()
 
     # PackageMessengerThread should start last because it triggers actions 
     global package_messenger_thread
     if package_messenger_thread is None:
         if package_thread.isAlive():
-            package_messenger_thread = \
-                    PackageMessengerThread(name="PackageMessengerThread")
+            package_messenger_thread = PackageMessengerThread()
         else:
             log.warning("Package messenger will not start")
 

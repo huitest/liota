@@ -34,9 +34,8 @@ from Queue import Queue, PriorityQueue, Full
 import heapq
 import inspect
 import logging
-from threading import Thread, Condition, Lock
+from threading import Thread, Condition
 from time import time as _time
-from time import sleep
 
 from liota.utilities.utility import getUTCmillis
 
@@ -145,11 +144,10 @@ class SendThread(Thread):
             matric.send_data()
 
 class CollectionThread(Thread):
-    def __init__(self, worker_stat_lock, name=None):
-        Thread.__init__(self, name=name)
+    def __init__(self):
+        Thread.__init__(self)
         self.daemon = True
         self.working_obj = None
-        self._worker_stat_lock = worker_stat_lock
         self.start()
 
     def run(self):
@@ -163,11 +161,9 @@ class CollectionThread(Thread):
                 if not matric.flag_alive:
                     log.debug("Disregarded dead metric")
                     continue
-                with self._worker_stat_lock:
-                    self.working_obj = matric
+                self.working_obj = matric
                 matric.collect()
-                with self._worker_stat_lock:
-                    self.working_obj = None
+                self.working_obj = None
                 if not matric.flag_alive:
                     log.debug("Disregarded dead metric")
                     continue
@@ -182,56 +178,20 @@ class CollectionThreadPool:
     def __init__(self, num_threads):
         self._num_threads = num_threads
         self._pool = []
-        self._worker_stat_lock = Lock()
 
         log.info("Starting " + str(num_threads) + " for collection")
-        for j in range(num_threads):
-            self._pool.append(CollectionThread(
-                    self._worker_stat_lock,
-                    name="Collector-%d" % (j + 1)
-                ))
+        for _ in range(num_threads):
+            self._pool.append(CollectionThread())
 
     def get_num_threads(self):
         return self._num_threads
 
-    def get_stats_working(self):
-        num_working = 0
-        num_alive = 0
-        num_all = 0
-        with self._worker_stat_lock:
-            for tref in self._pool:
-                if not isinstance(tref, Thread):
-                    continue
-                num_all += 1
-                if tref.isAlive():
-                    num_alive += 1
-                if not tref.working_obj is None:
-                    num_working += 1
-        return [num_working,
-                num_alive,
-                num_all,
-                self._num_threads]
-
-    def kill_collecting_on_metric(self, metric):
-        assert(isinstance(metric, Metric))
-        with self._worker_stat_lock:
-            for j in xrange(0, len(self._pool)):
-                tref = self._pool[j]
-                if not isinstance(tref, CollectionThread):
-                    continue
-                if tref.working_obj == metric:
-                    tref._Thread__stop()
-                    if tref.isAlive():
-                        sleep(3)
-                        if tref.isAlive():
-                            log.info("Unable to stop collection thread: %016x" \
-                                    % tref.ident)
-                            continue
-                    log.info("Stopped collection thread: %016x" \
-                            % tref.ident)
-                    tref.working_obj = None
-                    self._pool[j] = None
-
+    def get_num_working(self):
+        ret = 0
+        for tref in self._pool:
+            if not tref.working_obj is None:
+                ret += 1
+        return ret
 
 is_initialization_done = False
 
@@ -336,6 +296,5 @@ class Metric(object):
             self.flag_alive = False
             log.info("Metric %s is marked for deletion" % str(self.details))
 
-            # Handle blocked sampling functions and their collecting thread
-            global collect_thread_pool
-            collect_thread_pool.kill_collecting_on_metric(self)
+            # TODO: Handle blocked sampling functions and their collecting thread
+
