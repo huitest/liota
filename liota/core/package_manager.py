@@ -366,7 +366,7 @@ class PackageThread(Thread):
                     elif command == "reload":
                         self._package_reload(file_name)
                     elif command == "update":
-                        pass # TODO
+                        self._package_update(file_name)
                     else: # should not happen
                         raise RuntimeError("Command category error")
             elif command == "list":
@@ -592,9 +592,9 @@ class PackageThread(Thread):
 
     #-----------------------------------------------------------------------
     # This method is called to reload package.
-    # We keep track of full file name (with ext) when loading, so reload
+    # We keep track of full file name (with ext) when unloading, so reload
     # will always load exactly that same file, even if a different higher-
-    # level source file is added before reload.
+    # priority source file is added before reload.
 
     def _package_reload(self, file_name):
         log.debug("Attempting to reload package: %s" % file_name)
@@ -604,13 +604,6 @@ class PackageThread(Thread):
             log.warning("Could not reload package - not loaded: %s" \
                     % file_name)
             return False
-
-        """
-        # Get extension of source or compiled file of package module
-        package_record = self._packages_loaded[file_name]
-        assert(isinstance(package_record, PackageRecord))
-        ext_forced = package_record.get_ext()
-        """
         
         # Logic of reload
         track_list = []
@@ -642,10 +635,56 @@ class PackageThread(Thread):
             log.warning("Could not unload package: %s" % file_name)
         return False
 
+    #-----------------------------------------------------------------------
+    # This method is called to update package.
+    # We keep track of full file name (without ext) when unloading.
+    # The difference between this method and _package_reload is:
+    #   1)  If target package is not loaded, this method tries to load it.
+    #   2)  For all packages involved in update, this method calls 
+    #       _package_load to look for source files and compiled files in our
+    #       preferred priority order, so updated source file can be used to
+    #       update target package even if it was loaded using compiled file.
+
     def _package_update(self, file_name):
         log.debug("Attempting to update package: %s" % file_name)
-        pass # TODO
-        log.info("Updated package: %s" % file_name)
+        
+        # Check if specified package is already loaded
+        if not file_name in self._packages_loaded:
+            log.info("Package is not loaded, will try to load: %s" \
+                    % file_name)
+            return self._package_load(file_name)
+        
+        # Logic of reload
+        track_list = []
+        if self._package_unload(file_name, track_list=track_list):
+            package_record = None
+            track_list.reverse()
+            log.info("Packages will be reloaded and updated: %s" \
+                    % " ".join(
+                            map(lambda item: item[0], track_list)
+                        )
+                )
+            for track_item in track_list:
+                if track_item[0] in self._packages_loaded:
+                    continue
+                temp_record = \
+                    self._package_load(track_item[0])
+                if temp_record is not None:
+                    if track_item[0] == file_name:
+                        package_record = temp_record
+                    log.info("Reloaded and updated package: %s" % file_name)
+                else:
+                    log.error("Unloaded but could not reload package: %s" \
+                            % file_name)
+            if not package_record is None:
+                return package_record
+            else:
+                return False
+        else:
+            log.warning("Could not unload package: %s" % file_name)
+        return False
+
+        log.info("Reloaded and updated package: %s" % file_name)
 
 class PackageMessengerThread(Thread):
     """
