@@ -389,6 +389,8 @@ class PackageThread(Thread):
                             self._package_load_list(list_packages)
                         elif command == "unload":
                             self._package_unload_list(list_packages)
+                        elif command == "update":
+                            self._package_update_list(list_packages)
                         else:
                             log.warning("Batch operation not supported: %s" \
                                     % command)
@@ -424,6 +426,9 @@ class PackageThread(Thread):
             elif command == "unload_all":
                 with package_lock:
                     self._package_unload_list(self._packages_loaded.keys())
+            elif command == "update_all":
+                with package_lock:
+                    self._package_update_list(self._packages_loaded.keys())
             else:
                 log.warning("Unsupported command is dropped")
 
@@ -745,7 +750,7 @@ class PackageThread(Thread):
     # If any package in list is already loaded, it will be simply ignored - 
     # Neither will this method throw an exception, nor will this package be 
     # reloaded.
-    # It returns true if all packages in list are successfully loaded.
+    # It returns True if all packages in list are successfully loaded.
 
     def _package_load_list(self, package_list):
         log.debug("Attempting to load packages: %s" \
@@ -760,7 +765,8 @@ class PackageThread(Thread):
         if len(list_failed) > 0:
             log.warning("Some packages specified in list failed to load: %s" \
                     % " ".join(list_failed))
-        log.info("Batch load successful")
+        else:
+            log.info("Batch load successful")
         return len(list_failed) < 1
 
     #-----------------------------------------------------------------------
@@ -768,34 +774,66 @@ class PackageThread(Thread):
     # If any package in list is not loaded, it will be simply ignored - 
     # This method will simply assume it is successfully unloaded and won't
     # throw an exception.
-    # It returns true if all packages in list are successfully unloaded.
+    # It returns True if all packages in list are successfully unloaded.
 
-    def _package_unload_list(self, package_list):
+    def _package_unload_list(self, package_list, track_list=None):
         log.debug("Attempting to unload packages: %s" \
                 % " ".join(package_list))
         list_failed = []
         for file_name in package_list:
             if not file_name in self._packages_loaded:
                 continue
-            if not self._package_unload(file_name):
+            if not self._package_unload(file_name, track_list=track_list):
                 list_failed.append(file_name)
 
         if len(list_failed) > 0:
             log.warning("Some packages specified in list failed to unload: %s" \
                     % " ".join(list_failed))
-        log.info("Batch unload successful")
+        else:
+            log.info("Batch unload successful")
         return len(list_failed) < 1
+
+    #-----------------------------------------------------------------------
+    # This method is called to update a list of packages.
+    # It first unload packages in that list, and then load them back.
+
+    def _package_update_list(self, package_list):
+        log.debug("Attempting to update packages: %s" \
+                % " ".join(package_list))
+        flag_failed = False
+
+        # Acquire a list of all dependents of these packages
+        track_list = []
+        if not self._package_unload_list(package_list, track_list=track_list):
+            flag_failed = True
+        track_list.reverse()
+
+        # Load packages, in case some packages not loaded are to be updated
+        if not self._package_load_list(package_list):
+            flag_failed = True
+
+        # Load all dependents
+        if len(track_list) > 0:
+            if not self._package_load_list(map(lambda x: x[0], track_list)):
+                flag_failed = True
+        
+        if flag_failed:
+            log.warning("Some packages failed to update. See log for details")
+        else:
+            log.info("Batch update successful")
+        return not flag_failed
 
     #-----------------------------------------------------------------------
     # This method is called to load packages that are specified in
     # configuration for automatic loading at start-up.
 
     def _package_load_auto(self):
-        # Validate start-up list
         global package_startup_list_path
         global package_startup_list
 
         package_startup_list = []
+
+        # Validate start-up list
         if isinstance(package_startup_list_path, basestring):
             try:
                 with open(package_startup_list_path, "r") as fp:
