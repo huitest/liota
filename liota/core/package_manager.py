@@ -186,6 +186,7 @@ class PackageRecord:
         self._ext = None
         self._sha1 = None
         self._dependents = {} # key: dependent name, value: None
+        self._dependencies = []
 
         #-------------------------------------------------------------------
         # To guarantee successful garbage collection when record is removed,
@@ -223,6 +224,12 @@ class PackageRecord:
 
     def del_dependent(self, file_name):
         del self._dependents[file_name]
+
+    def get_dependencies(self):
+        return self._dependencies
+
+    def set_dependencies(self, list_dependencies):
+        self._dependencies = list_dependencies
 
 class PackageThread(Thread):
     """
@@ -469,6 +476,7 @@ class PackageThread(Thread):
         # Acquire dependency list and recursively load them.
         # If any dependency fails to load, current package will not load.
 
+        dependencies = []
         if hasattr(module_loaded, "dependencies"):
             dependencies = getattr(module_loaded, "dependencies")
             if not isinstance(dependencies, list):
@@ -519,6 +527,7 @@ class PackageThread(Thread):
             return None
         package_record.set_sha1(sha1)
         package_record.set_ext(file_ext)
+        package_record.set_dependencies(dependencies)
         self._packages_loaded[file_name] = package_record
 
         log.info("Package class from module %s is initialized" \
@@ -553,7 +562,7 @@ class PackageThread(Thread):
                     log.error("%s is still alive, because %s failed to unload" \
                         % (file_name, dependent))
                     return False
-                package_record.del_dependent(dependent)
+                # package_record.del_dependent(dependent)
             log.debug("Dependency check of package %s is complete" \
                 % file_name)
 
@@ -578,6 +587,15 @@ class PackageThread(Thread):
             package_obj.clean_up()
         except Exception as er:
             log.error("Exception in clean-up: %s" % er)
+
+        # Remove dependent item from dependencies
+        log.debug("Package %s depends on: %s" \
+                % (file_name, " ".join(package_record.get_dependencies())))
+        for dependency in package_record.get_dependencies():
+            self._packages_loaded[dependency].del_dependent(file_name)
+            log.debug("Package %s is no longer a dependent of %s" \
+                    % (file_name, dependency))
+
         if isinstance(track_list, list):
             track_list.append((file_name, package_record.get_ext()))
         del self._packages_loaded[file_name]
