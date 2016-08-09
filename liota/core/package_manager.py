@@ -711,16 +711,36 @@ class PackageMessengerThread(Thread):
     Current implementation of PackageMessengerThread blocks on a named pipe.
     """
 
-    def __init__(self, name=None):
+    def __init__(self, pipe_file, name=None):
         Thread.__init__(self, name=name)
+        self._pipe_file = pipe_file
+
+        # Unblock previous writers
+        BUFFER_SIZE = 65536
+        ph = None
+        try:
+            ph = os.open(self._pipe_file, os.O_RDONLY | os.O_NONBLOCK)
+            while True:
+                buffer = os.read(ph, BUFFER_SIZE)
+                if len(buffer) < BUFFER_SIZE:
+                    break
+        except OSError as err:
+            import errno
+            if err.errno == errno.EAGAIN or err.errno == errno.EWOULDBLOCK:
+                pass # It is supposed to raise one of these exceptions
+            else:
+                raise err
+        finally:
+            if ph:
+                os.close(ph)
+
         self.start()
 
     def run(self):
-        global package_messenger_pipe
         global package_message_queue
 
         while True:
-            with open(package_messenger_pipe, "r") as fp:
+            with open(self._pipe_file, "r") as fp:
                 for line in fp.readlines():
                     msg = line.split()
                     if len(msg) > 0:
@@ -807,7 +827,10 @@ def initialize():
     if package_messenger_thread is None:
         if package_thread.isAlive():
             package_messenger_thread = \
-                    PackageMessengerThread(name="PackageMessengerThread")
+                PackageMessengerThread(
+                        pipe_file=package_messenger_pipe,
+                        name="PackageMessengerThread"
+                    )
         else:
             log.warning("Package messenger will not start")
 
