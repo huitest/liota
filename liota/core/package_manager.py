@@ -75,15 +75,30 @@ if fullPath != '':
                 package_messenger_pipe = os.path.abspath(
                         config.get('PKG_CFG', 'pkg_msg_pipe')
                     )
-            except ConfigParser.ParsingError, err:
+            except ConfigParser.ParsingError:
                 log.error('Could not parse log config file')
+                exit(-4)
         else:
-            raise IOError('Cannot open configuration file ' + fullPath)
+            raise IOError('Could not open configuration file: ' + fullPath)
     except IOError:
-        log.error('Could not open config file')
+        raise IOError('Could not open configuration file: ' + fullPath)
 else:
     # missing config file
     log.error('liota.conf file missing')
+
+assert(isinstance(package_path, basestring))
+assert(isinstance(package_messenger_pipe, basestring))
+
+package_startup_list_path = None
+package_startup_list = []
+
+# Parse packages to load at start-up
+try:
+    package_startup_list_path = os.path.abspath(
+            config.get('PKG_CFG', 'pkg_list')
+        )
+except (ConfigParser.ParsingError, ConfigParser.NoOptionError):
+    pass
 
 class ResourceRegistryPerPackage:
     """
@@ -343,6 +358,11 @@ class PackageThread(Thread):
 
     def run(self):
         global package_lock
+        global package_startup_list
+
+        # Load packages specified for automatic loading
+        with package_lock:
+            self._package_load_auto()
 
         # Listen on message queue for commands
         # Other packages are loaded here according to commands received
@@ -360,8 +380,18 @@ class PackageThread(Thread):
                 # Use these commands to handle package management tasks
 
                 with package_lock:
-                    if len(msg) != 2:
-                        log.warning("Invalid format of command: %s" % command)
+                    if len(msg) < 2:
+                        log.warning("No package is specified: %s" % command)
+                        continue
+                    if len(msg) > 2:
+                        list_packages = msg[1:]
+                        if command == "load":
+                            self._package_load_list(list_packages)
+                        elif command == "unload":
+                            self._package_unload_list(list_packages)
+                        else:
+                            log.warning("Batch operation not supported: %s" \
+                                    % command)
                         continue
                     file_name = msg[1]
                     if command == "load":
@@ -388,6 +418,12 @@ class PackageThread(Thread):
                         log.warning("Invalid format of command: %s" % command)
                         continue
                     self._cmd_handler_stat(msg[1])
+            elif command == "load_auto":
+                with package_lock:
+                    self._package_load_auto()
+            elif command == "unload_all":
+                with package_lock:
+                    self._package_unload_list(self._packages_loaded.keys())
             else:
                 log.warning("Unsupported command is dropped")
 
@@ -704,6 +740,76 @@ class PackageThread(Thread):
 
         log.info("Reloaded and updated package: %s" % file_name)
 
+    #-----------------------------------------------------------------------
+    # This method is called to load a list of packages.
+    # If any package in list is already loaded, it will be simply ignored - 
+    # Neither will this method throw an exception, nor will this package be 
+    # reloaded.
+    # It returns true if all packages in list are successfully loaded.
+
+    def _package_load_list(self, package_list):
+        log.debug("Attempting to load packages: %s" \
+                % " ".join(package_list))
+        list_failed = []
+        for file_name in package_list:
+            if file_name in self._packages_loaded:
+                continue
+            if not self._package_load(file_name):
+                list_failed.append(file_name)
+
+        if len(list_failed) > 0:
+            log.warning("Some packages specified in list failed to load: %s" \
+                    % " ".join(list_failed))
+        log.info("Batch load successful")
+        return len(list_failed) < 1
+
+    #-----------------------------------------------------------------------
+    # This method is called to unload a list of packages.
+    # If any package in list is not loaded, it will be simply ignored - 
+    # This method will simply assume it is successfully unloaded and won't
+    # throw an exception.
+    # It returns true if all packages in list are successfully unloaded.
+
+    def _package_unload_list(self, package_list):
+        log.debug("Attempting to unload packages: %s" \
+                % " ".join(package_list))
+        list_failed = []
+        for file_name in package_list:
+            if not file_name in self._packages_loaded:
+                continue
+            if not self._package_unload(file_name):
+                list_failed.append(file_name)
+
+        if len(list_failed) > 0:
+            log.warning("Some packages specified in list failed to unload: %s" \
+                    % " ".join(list_failed))
+        log.info("Batch unload successful")
+        return len(list_failed) < 1
+
+    #-----------------------------------------------------------------------
+    # This method is called to load packages that are specified in
+    # configuration for automatic loading at start-up.
+
+    def _package_load_auto(self):
+        # Validate start-up list
+        global package_startup_list_path
+        global package_startup_list
+
+        package_startup_list = []
+        if isinstance(package_startup_list_path, basestring):
+            try:
+                with open(package_startup_list_path, "r") as fp:
+                    package_startup_list = fp.read().split()
+            except IOError:
+                log.warning("Could not load start-up list from: %s" \
+                        % package_startup_list_path)
+        else:
+            log.info("No package is automatically loaded at start-up")
+
+        # Load packages in a batch
+        if len(package_startup_list) > 0:
+            self._package_load_list(package_startup_list)
+
 class PackageMessengerThread(Thread):
     """
     PackageMessengerThread does inter-process communication (IPC) to listen
@@ -722,7 +828,7 @@ class PackageMessengerThread(Thread):
             ph = os.open(self._pipe_file, os.O_RDONLY | os.O_NONBLOCK)
             while True:
                 buffer = os.read(ph, BUFFER_SIZE)
-                if len(buffer) < BUFFER_SIZE:
+                if not buffer:
                     break
         except OSError as err:
             import errno
