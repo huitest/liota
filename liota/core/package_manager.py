@@ -401,7 +401,7 @@ class PackageThread(Thread):
                     elif command == "unload":
                         self._package_unload(file_name)
                     elif command == "delete":
-                        pass # TODO
+                        self._package_delete(file_name)
                     elif command == "reload":
                         self._package_reload(file_name)
                     elif command == "update":
@@ -437,6 +437,8 @@ class PackageThread(Thread):
     # file_name (no_ext) as package identifier.
 
     def _package_load(self, file_name, ext_forced=None, check_stack=None):
+        global package_path
+
         log.debug("Attempting to load package: %s" % file_name)
 
         # Check if specified package is already loaded
@@ -499,18 +501,23 @@ class PackageThread(Thread):
 
         module_loaded = None
         module_name = re.sub(r"\.", "_", file_name)
-        if file_ext in ["py"]:
-            module_loaded = imp.load_source(
-                    module_name,
-                    path_file_ext
-                )
-        elif file_ext in ["pyc", "pyo"]:
-            module_loaded = imp.load_compiled(
-                    module_name,
-                    path_file_ext
-                )
-        else: # should not happen
-            raise RuntimeError("File extension category error")
+        try:
+            if file_ext in ["py"]:
+                module_loaded = imp.load_source(
+                        module_name,
+                        path_file_ext
+                    )
+            elif file_ext in ["pyc", "pyo"]:
+                module_loaded = imp.load_compiled(
+                        module_name,
+                        path_file_ext
+                    )
+            else: # should not happen
+                raise RuntimeError("File extension category error")
+        except Exception, err:
+            log.error("Error loading module: %s" % str(err))
+            return None
+
         log.debug("Loaded module: %s" % module_loaded.__name__)
 
         #-------------------------------------------------------------------
@@ -554,6 +561,10 @@ class PackageThread(Thread):
                         % file_name)
 
         # Get package class from module and instantiate it
+        if not hasattr(module_loaded, "PackageClass"):
+            log.error("Invalid package: %s" % module_name)
+            return None
+
         klass = getattr(module_loaded, "PackageClass")
         package_record = PackageRecord(file_name)
         if not package_record.set_instance(klass()):
@@ -847,6 +858,74 @@ class PackageThread(Thread):
         # Load packages in a batch
         if len(package_startup_list) > 0:
             self._package_load_list(package_startup_list)
+
+    def _package_delete(self, file_name):
+        global package_path
+
+        log.debug("Attempting to delete package: %s" % file_name)
+
+        # Check if specified package is loaded, if yes, unload first
+        if file_name in self._packages_loaded:
+            if not self._package_unload(file_name):
+
+                #-----------------------------------------------------------
+                # In this case, specified package is already loaded, but
+                # we failed to unload it. However, it should be totally fine
+                # to delete corresponding file(s) of that package even if
+                # it is loaded - at least in Python 2.
+                # Therefore, we log this as a warning and continue deletion.
+
+                log.warning("Package is loaded but failed to unload")
+
+        # Find all files associated with this package name
+        c_slash = "/"
+        if package_path.endswith(c_slash):
+            c_slash = ""
+        path_file = os.path.abspath(package_path + c_slash + file_name)
+
+        extensions = ["py", "pyc", "pyo"]
+        file_names_found = []
+        for file_ext_ind in extensions:
+            if os.path.exists(path_file + "." + file_ext_ind):
+                file_names_found.append(file_name + "." + file_ext_ind)
+
+        if len(file_names_found) < 1:
+            log.warning("No source or compiled file found for package: %s" \
+                    % file_name)
+            return False
+
+        # Create stash folder for delete packages
+        stash_dir = package_path + c_slash + "stash"
+        if not os.path.isdir(stash_dir):
+            try:
+                os.makedirs(stash_dir)
+            except OSError:
+                log.warning("Could not create stash directory: %s" % stash_dir)
+
+        # Move files to stash directory
+        flag_failed = False
+        for file_name_found in file_names_found:
+            file_name_src = package_path + c_slash + file_name_found
+            try:
+                os.rename(
+                        file_name_src,
+                        package_path + c_slash + "stash/" + file_name_found
+                    )
+                log.debug("File moved to stash: %s" % file_name_found)
+            except OSError:
+                log.warning("Could not move file: %s" % file_name_src)
+                try:
+                    os.remove(file_name_src)
+                    log.debug("File removed: %s" % file_name_found)
+                except OSError:
+                    log.error("Could not remove file: %s" % file_name_src)
+                    flag_failed = True
+
+        if flag_failed:
+            log.warning("Some files failed to delete. See log for details")
+        else:
+            log.info("Package is deleted: %s" % file_name)
+        return not flag_failed
 
 class PackageMessengerThread(Thread):
     """
