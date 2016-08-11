@@ -32,42 +32,18 @@
 
 from liota.core.package_manager import LiotaPackage
 
-dependencies = ["gateway"]
-
 class PackageClass(LiotaPackage):
     """
-    This package creates a vROps DCC object and registers gateway on vROps
-    to acquire "registered gateway", i.e. vrops_gateway.
+    This package creates a shared pint unit registry for all packages that
+    need pint. 
     """
 
     def run(self, registry):
-        import copy
-        from liota.dcc.vrops import Vrops
-        from liota.transports.web_socket import WebSocket
+        from pint import UnitRegistry
 
-        # Acquire resources from registry
-        # Creating a copy of gateway object to keep original object "clean"
-        gateway = copy.copy(registry.get("gateway"))
-
-        # Get values from configuration file
-        config = {}
-        config_path = registry.get("package_conf")
-        execfile(config_path + "/sampleProp.conf", config)
-
-        # Initialize DCC object with transport
-        self.vrops = Vrops(
-                config['vROpsUID'],
-                config['vROpsPass'],
-                WebSocket(url=config['WebSocketUrl'])
-            )
-
-        # Register gateway
-        vrops_gateway = self.vrops.register(gateway)
-        assert(vrops_gateway.registered)
-        self.vrops.set_properties(vrops_gateway, config['Gateway1PropList'])
-        
-        registry.register("vrops", self.vrops)
-        registry.register("vrops_gateway", vrops_gateway)
+        # Initialize unit registry
+        ureg = UnitRegistry()
+        registry.register("pint_ureg", ureg)
 
     def clean_up(self):
-        self.vrops.con.close()
+        pass

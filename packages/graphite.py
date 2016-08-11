@@ -35,6 +35,10 @@ from liota.core.package_manager import LiotaPackage
 dependencies = ["gateway"]
 
 class PackageClass(LiotaPackage):
+    """
+    This package creates a Graphite DCC object and registers gateway on
+    Graphite to acquire "registered gateway", i.e. graphite_gateway.
+    """
 
     def run(self, registry):
         import copy
@@ -42,6 +46,7 @@ class PackageClass(LiotaPackage):
         from liota.transports.socket_connection import Socket
 
         # Acquire resources from registry
+        # Creating a copy of gateway object to keep original object "clean"
         gateway = copy.copy(registry.get("gateway"))
 
         # Get values from configuration file
