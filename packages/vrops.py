@@ -37,11 +37,12 @@ dependencies = ["gateway"]
 class PackageClass(LiotaPackage):
 
     def run(self, registry):
+        import copy
         from liota.dcc.vrops import Vrops
         from liota.transports.web_socket import WebSocket
 
         # Acquire resources from registry
-        gateway = registry.get("gateway")
+        gateway = copy.copy(registry.get("gateway"))
 
         # Get values from configuration file
         config = {}
@@ -54,10 +55,13 @@ class PackageClass(LiotaPackage):
                 config['vROpsPass'],
                 WebSocket(url=config['WebSocketUrl'])
             )
-        registry.register("vrops", self.vrops)
 
         # Register gateway
         vrops_gateway = self.vrops.register(gateway)
+        assert(vrops_gateway.registered)
+        self.vrops.set_properties(vrops_gateway, config['Gateway1PropList'])
+        
+        registry.register("vrops", self.vrops)
         registry.register("vrops_gateway", vrops_gateway)
 
     def clean_up(self):

@@ -37,11 +37,12 @@ dependencies = ["gateway"]
 class PackageClass(LiotaPackage):
 
     def run(self, registry):
+        import copy
         from liota.dcc.graphite_dcc import Graphite
         from liota.transports.socket_connection import Socket
 
         # Acquire resources from registry
-        gateway = registry.get("gateway")
+        gateway = copy.copy(registry.get("gateway"))
 
         # Get values from configuration file
         config = {}
@@ -54,10 +55,12 @@ class PackageClass(LiotaPackage):
                         config['GraphiteIP'],
                         config['GraphitePort'])
             )
-        registry.register("graphite", self.graphite)
 
         # Register gateway
         graphite_gateway = self.graphite.register(gateway)
+        assert(graphite_gateway.registered)
+
+        registry.register("graphite", self.graphite)
         registry.register("graphite_gateway", graphite_gateway)
 
     def clean_up(self):

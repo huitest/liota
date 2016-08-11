@@ -95,13 +95,21 @@ class EventsPriorityQueue(PriorityQueue):
             while isNotReady:
                 if self._qsize() > 0:
                     first_element = heapq.nsmallest(1, self.queue)[0]
-                    timeout = (first_element.get_next_run_time() - getUTCmillis()) / 1000.0
-                    log.info("Waiting on acquired first_element_changed LOCK for: " + str(timeout))
+                    if not first_element.flag_alive:
+                        log.debug("Early termination of dead metric")
+                        first_element = self._get()
+                        break
+                    timeout = ( \
+                            first_element.get_next_run_time() - getUTCmillis() \
+                        ) / 1000.0
+                    log.info("Waiting on acquired first_element_changed LOCK " \
+                            + "for: %.2f" % timeout)
                     self.first_element_changed.wait(timeout)
                 else:
                     self.first_element_changed.wait()
                     first_element = heapq.nsmallest(1, self.queue)[0]
-                if (first_element.get_next_run_time() - getUTCmillis()) <= 0:
+                if (first_element.get_next_run_time() - getUTCmillis()) <= 0 \
+                        or not first_element.flag_alive:
                     isNotReady = False
                     first_element = self._get()
             return first_element
@@ -123,7 +131,7 @@ class EventCheckerThread(Thread):
             matric = event_ds.get_next_element_when_ready()
             log.debug("Got event:" + str(matric))
             if not matric.flag_alive:
-                log.debug("Disregarded dead metric")
+                log.debug("Discarded dead metric: %s" % str(matric))
                 continue
             collect_queue.put(matric)
 
@@ -138,9 +146,9 @@ class SendThread(Thread):
         while True:
             log.info("Waiting to send...")
             matric = send_queue.get()
-            log.info("Got item in send_queue:" + str(matric))
+            log.info("Got item in send_queue: " + str(matric))
             if not matric.flag_alive:
-                log.debug("Disregarded dead metric")
+                log.debug("Discarded dead metric: %s" % str(matric))
                 continue
             matric.send_data()
 
@@ -158,10 +166,10 @@ class CollectionThread(Thread):
         global send_queue
         while True:
             matric = collect_queue.get()
-            log.info("Collecting stats for matric:" + str(matric))
+            log.info("Collecting stats for metric: " + str(matric))
             try:
                 if not matric.flag_alive:
-                    log.debug("Disregarded dead metric")
+                    log.debug("Discarded dead metric: %s" % str(matric))
                     continue
                 with self._worker_stat_lock:
                     self.working_obj = matric
@@ -169,7 +177,7 @@ class CollectionThread(Thread):
                 with self._worker_stat_lock:
                     self.working_obj = None
                 if not matric.flag_alive:
-                    log.debug("Disregarded dead metric")
+                    log.debug("Discarded dead metric: %s" % str(matric))
                     continue
                 matric.set_next_run_time()
                 event_ds.put_and_notify(matric)
