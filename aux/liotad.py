@@ -31,4 +31,16 @@
 #  THE POSSIBILITY OF SUCH DAMAGE.                                            #
 # ----------------------------------------------------------------------------#
 
+from time import sleep
 import liota.core.package_manager
+
+try:
+    while not isinstance(
+            liota.core.package_manager.package_thread, 
+            liota.core.package_manager.PackageThread
+        ) or liota.core.package_manager.package_thread.isAlive():
+            sleep(1)
+except (KeyboardInterrupt, SystemExit):
+    pass
+finally:
+    liota.core.package_manager.package_message_queue.put(["terminate"])

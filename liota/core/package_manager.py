@@ -49,8 +49,21 @@ log = logging.getLogger(__name__)
 
 if __name__ == "__main__":
     log.warning("Package manager is not supposed to run alone")
-    import liota.core.package_manager
-    log.debug("MainThread is going to exit...")
+
+    import liota.core.package_manager as actual_package_manager
+    
+    log.debug("MainThread is waiting for interruption signal...")
+    try:
+        while not isinstance(
+                actual_package_manager.package_thread,
+                actual_package_manager.PackageThread
+            ) or actual_package_manager.package_thread.isAlive():
+            sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        actual_package_manager.package_message_queue.put(["terminate"])
+    log.info("MainThread exits")
     exit()
 
 is_package_manager_initialized = False
@@ -262,6 +275,7 @@ class PackageThread(Thread):
         self._packages_loaded = {} # key: package name, value: PackageRecord obj
         self._resource_registry = ResourceRegistry()
         self._resource_registry.register("package_conf", package_path)
+        self.flag_alive = True
         self.start()
 
     #-----------------------------------------------------------------------
@@ -366,7 +380,7 @@ class PackageThread(Thread):
 
         # Listen on message queue for commands
         # Other packages are loaded here according to commands received
-        while True:
+        while self.flag_alive:
             msg = package_message_queue.get()
             log.info("Got message in package messenger queue: %s" \
                     % " ".join(msg))
@@ -429,8 +443,13 @@ class PackageThread(Thread):
             elif command == "update_all":
                 with package_lock:
                     self._package_update_list(self._packages_loaded.keys())
+            elif command == "terminate":
+                if self._terminate_all():
+                    self.flag_alive = False
+                    break
             else:
                 log.warning("Unsupported command is dropped")
+        log.info("Thread exits: %s" % str(self.name))
 
     #-----------------------------------------------------------------------
     # This method is called to load package into current Liota process using
@@ -859,6 +878,12 @@ class PackageThread(Thread):
         if len(package_startup_list) > 0:
             self._package_load_list(package_startup_list)
 
+    #-----------------------------------------------------------------------
+    # This method is called to delete package. All source files and compiled
+    # files associated with specified package name will be affected.
+    # It tries to move "deleted" files into a subdirectory called "stash".
+    # If moving fails, it then tries to really delete these files.
+
     def _package_delete(self, file_name):
         global package_path
 
@@ -927,6 +952,34 @@ class PackageThread(Thread):
             log.info("Package is deleted: %s" % file_name)
         return not flag_failed
 
+    #-----------------------------------------------------------------------
+    # This method is called to signal termination to all threads in package
+    # manager, and calls metric handler to terminate its threads too.
+    # Supposedly, it should be able to let Liota exit elegantly.
+
+    def _terminate_all(self):
+        global package_messenger_thread
+        global package_messenger_pipe
+
+        log.info("Shutting down package messenger...")
+        if package_messenger_thread.isAlive():
+            with open(package_messenger_pipe, "w") as fp:
+                fp.write( \
+                    "terminate_messenger_but_you_should_not_do_this_yourself\n")
+
+        log.info("Unloading packages...")
+        if not self._package_unload_list(self._packages_loaded.keys()):
+            log.error("Some packages failed to unload. See log for details")
+            return False
+
+        log.info("Terminating metric handler threads...")
+
+        from liota.core.metric_handler import terminate as handler_terminate
+
+        handler_terminate()
+        return True
+
+
 class PackageMessengerThread(Thread):
     """
     PackageMessengerThread does inter-process communication (IPC) to listen
@@ -957,17 +1010,23 @@ class PackageMessengerThread(Thread):
             if ph:
                 os.close(ph)
 
+        self.flag_alive = True
         self.start()
 
     def run(self):
         global package_message_queue
 
-        while True:
+        while self.flag_alive:
             with open(self._pipe_file, "r") as fp:
                 for line in fp.readlines():
                     msg = line.split()
                     if len(msg) > 0:
+                        if len(msg) == 1 and msg[0] == \
+                    "terminate_messenger_but_you_should_not_do_this_yourself":
+                            self.flag_alive = False
+                            break
                         package_message_queue.put(msg)
+        log.info("Thread exits: %s" % str(self.name))
 
 #---------------------------------------------------------------------------
 # Initialization should occur when this module is imported for first time.
@@ -1028,6 +1087,7 @@ def initialize():
             package_messenger_pipe = None
             log.error("Could not create messenger pipe")
             return
+    assert(stat.S_ISFIFO(os.stat(package_messenger_pipe).st_mode))
 
     # Will not initialize package manager if package path is mis-configured
     if package_path is None:

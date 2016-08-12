@@ -95,6 +95,9 @@ class EventsPriorityQueue(PriorityQueue):
             while isNotReady:
                 if self._qsize() > 0:
                     first_element = heapq.nsmallest(1, self.queue)[0]
+                    if isinstance(first_element, SystemExit):
+                        first_element = self._get()
+                        break
                     if not first_element.flag_alive:
                         log.debug("Early termination of dead metric")
                         first_element = self._get()
@@ -108,6 +111,9 @@ class EventsPriorityQueue(PriorityQueue):
                 else:
                     self.first_element_changed.wait()
                     first_element = heapq.nsmallest(1, self.queue)[0]
+                if isinstance(first_element, SystemExit):
+                    first_element = self._get()
+                    break
                 if (first_element.get_next_run_time() - getUTCmillis()) <= 0 \
                         or not first_element.flag_alive:
                     isNotReady = False
@@ -117,40 +123,48 @@ class EventsPriorityQueue(PriorityQueue):
             self.first_element_changed.release()
 
 class EventCheckerThread(Thread):
-
-    def __init__(self):
-        Thread.__init__(self)
+    def __init__(self, name=None):
+        Thread.__init__(self, name=name)
+        self.flag_alive = True
         self.start()
 
     def run(self):
         log.info("Started EventCheckerThread")
         global event_ds
         global collect_queue
-        while True:
+        while self.flag_alive:
             log.debug("Waiting for event...")
             matric = event_ds.get_next_element_when_ready()
+            if isinstance(matric, SystemExit):
+                log.debug("Got exit signal")
             log.debug("Got event:" + str(matric))
             if not matric.flag_alive:
                 log.debug("Discarded dead metric: %s" % str(matric))
                 continue
             collect_queue.put(matric)
+        log.info("Thread exits: %s" % str(self.name))
 
 class SendThread(Thread):
-    def __init__(self):
-        Thread.__init__(self)
+    def __init__(self, name=None):
+        Thread.__init__(self, name=name)
+        self.flag_alive = True
         self.start()
 
     def run(self):
         log.info("Started SendThread")
         global send_queue
-        while True:
+        while self.flag_alive:
             log.info("Waiting to send...")
             matric = send_queue.get()
+            if isinstance(matric, SystemExit):
+                log.debug("Got exit signal")
+                break
             log.info("Got item in send_queue: " + str(matric))
             if not matric.flag_alive:
                 log.debug("Discarded dead metric: %s" % str(matric))
                 continue
             matric.send_data()
+        log.info("Thread exits: %s" % str(self.name))
 
 class CollectionThread(Thread):
     def __init__(self, worker_stat_lock, name=None):
@@ -234,7 +248,7 @@ def initialize():
             event_ds = EventsPriorityQueue()
         global event_checker_thread
         if event_checker_thread == None:
-            event_checker_thread = EventCheckerThread()
+            event_checker_thread = EventCheckerThread(name="EventCheckerThread")
         global collect_queue
         if collect_queue == None:
             collect_queue = Queue()
@@ -243,82 +257,96 @@ def initialize():
             send_queue = Queue()
         global send_thread
         if send_thread == None:
-            send_thread = SendThread()
+            send_thread = SendThread(name="SendThread")
         global collect_thread_pool
         # TODO: Make pool size configurable
         collect_thread_pool = CollectionThreadPool(20)
         is_initialization_done = True
 
+def terminate():
+    global event_checker_thread
+    if event_checker_thread:
+        event_checker_thread.flag_alive = False
+    global send_thread
+    if send_thread:
+        send_thread.flag_alive = False
+    global event_ds
+    if event_ds:
+        event_ds.put_and_notify(SystemExit(), timeout=0)
+    global send_queue
+    if send_queue:
+        send_queue.put(SystemExit())
+
 class Metric(object):
 
-        def __init__(self, gw, details, unit, sampling_interval_sec, aggregation_size, sampling_function, data_center_component):
-            self.data_center_component = data_center_component
-            self.gw = gw
-            self.details = details
-            self.unit = unit
-            self.sampling_interval_sec = sampling_interval_sec
-            self.aggregation_size = aggregation_size
-            self.current_aggregation_size = 0
-            self.sampling_function = sampling_function
-            self.values = []
-            self.flag_alive = True # For metric deletion and stop collection
+    def __init__(self, gw, details, unit, sampling_interval_sec, aggregation_size, sampling_function, data_center_component):
+        self.data_center_component = data_center_component
+        self.gw = gw
+        self.details = details
+        self.unit = unit
+        self.sampling_interval_sec = sampling_interval_sec
+        self.aggregation_size = aggregation_size
+        self.current_aggregation_size = 0
+        self.sampling_function = sampling_function
+        self.values = []
+        self.flag_alive = True # For metric deletion and stop collection
 
-        def __str__(self, *args, **kwargs):
-            return str(self.details) + ":" + str(self.next_run_time)
+    def __str__(self, *args, **kwargs):
+        return str(self.details) + ":" + str(self.next_run_time)
 
-        def __cmp__(self, other):
-            if other == None:
-                return -1
-            if not isinstance(other, Metric):
-                return -1
-            return cmp(self.next_run_time, other.next_run_time)
+    def __cmp__(self, other):
+        if other == None:
+            return -1
+        if not isinstance(other, Metric):
+            return -1
+        return cmp(self.next_run_time, other.next_run_time)
 
-        def write_full(self, t, v):
-            self.values.append((t, v))
+    def write_full(self, t, v):
+        self.values.append((t, v))
 
-        def write_map_values(self, v):
-            self.write_full(getUTCmillis(), v)
+    def write_map_values(self, v):
+        self.write_full(getUTCmillis(), v)
 
-        def get_next_run_time(self):
-            return self.next_run_time
+    def get_next_run_time(self):
+        return self.next_run_time
 
-        def set_next_run_time(self):
-            self.next_run_time = self.next_run_time + (self.sampling_interval_sec * 1000)
-            log.info("Set next run time to:" + str(self.next_run_time))
+    def set_next_run_time(self):
+        self.next_run_time = self.next_run_time + (self.sampling_interval_sec * 1000)
+        log.info("Set next run time to:" + str(self.next_run_time))
 
-        def start_collecting(self):
-            # TODO: Add a check to ensure that start_collecting for a metric is called only once by the client code
-            initialize()
-            global event_ds
-            self.next_run_time = getUTCmillis() + (self.sampling_interval_sec * 1000)
-            event_ds.put_and_notify(self)
+    def start_collecting(self):
+        # TODO: Add a check to ensure that start_collecting for a metric is called only once by the client code
+        initialize()
+        global event_ds
+        self.next_run_time = getUTCmillis() + (self.sampling_interval_sec * 1000)
+        event_ds.put_and_notify(self)
 
-        def is_ready_to_send(self):
-            log.debug("self.current_aggregation_size:" + str(self.current_aggregation_size))
-            log.debug("self.aggregation_size:" + str(self.aggregation_size))
-            return self.current_aggregation_size >= self.aggregation_size
+    def is_ready_to_send(self):
+        log.debug("self.current_aggregation_size:" + str(self.current_aggregation_size))
+        log.debug("self.aggregation_size:" + str(self.aggregation_size))
+        return self.current_aggregation_size >= self.aggregation_size
 
-        def collect(self):
-            log.debug("Collecting values for the resource {0} ".format(self.details))
-            self.args_required = len(inspect.getargspec(self.sampling_function)[0])
-            if self.args_required is not 0:
-                self.cal_value = self.sampling_function(1)
-            else:
-                self.cal_value = self.sampling_function()
-            log.info("{0} Sample Value: {1}".format(self.details, self.cal_value))
-            log.debug("Size of the list {0}".format(len(self.values)))
-            self.write_map_values(self.cal_value)
-            self.current_aggregation_size = self.current_aggregation_size + 1
+    def collect(self):
+        log.debug("Collecting values for the resource {0} ".format(self.details))
+        self.args_required = len(inspect.getargspec(self.sampling_function)[0])
+        if self.args_required is not 0:
+            self.cal_value = self.sampling_function(1)
+        else:
+            self.cal_value = self.sampling_function()
+        log.info("{0} Sample Value: {1}".format(self.details, self.cal_value))
+        log.debug("Size of the list {0}".format(len(self.values)))
+        self.write_map_values(self.cal_value)
+        self.current_aggregation_size = self.current_aggregation_size + 1
 
-        def send_data(self):
-            log.info("Publishing values {0} for the resource {1} ".format(self.values, self.details))
-            if not self.values:
-                # No values measured since last report_data
-                return True
-            self.data_center_component.publish(self)
-            self.values[:] = []
-            self.current_aggregation_size = 0
+    def send_data(self):
+        log.info("Publishing values {0} for the resource {1} ".format(self.values, self.details))
+        if not self.values:
+            # No values measured since last report_data
+            return True
+        self.data_center_component.publish(self)
+        self.values[:] = []
+        self.current_aggregation_size = 0
 
-        def stop_collecting(self):
-            self.flag_alive = False
-            log.info("Metric %s is marked for deletion" % str(self.details))
+    def stop_collecting(self):
+        self.flag_alive = False
+        log.info("Metric %s is marked for deletion" % str(self.details))
